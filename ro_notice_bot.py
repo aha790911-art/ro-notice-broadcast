@@ -5,7 +5,10 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+# 同時讀取 LINE 與 Discord 的環境變數
+LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+
 NOTICE_URL = "https://roz.gnjoy.com.tw/Notice"
 CACHE_FILE = "last_notice_id.txt"
 
@@ -19,9 +22,39 @@ def save_last_id(notice_id):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         f.write(str(notice_id))
 
+def send_line_notify(title, link):
+    """透過 LINE Messaging API Broadcast 發送廣播訊息"""
+    if not LINE_ACCESS_TOKEN:
+        return
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+    }
+    
+    message_text = f"📢 RO樂園 官網新公告\n\n【{title}】\n\n點擊前往官網查看：\n{link}"
+
+    payload = {
+        "messages": [
+            {
+                "type": "text",
+                "text": message_text
+            }
+        ]
+    }
+
+    try:
+        resp = requests.post("https://api.line.me/v2/bot/message/broadcast", headers=headers, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("[+] LINE 訊息推送成功")
+        else:
+            print(f"[-] LINE 推送失敗，狀態碼: {resp.status_code}, 回應: {resp.text}")
+    except Exception as e:
+        print(f"[-] 發送 LINE 發生例外: {e}")
+
 def send_discord_notify(title, link):
+    """保留 Discord 推播功能（若不需要可留空）"""
     if not DISCORD_WEBHOOK_URL:
-        print("[-] 錯誤：未找到 DISCORD_WEBHOOK_URL 環境變數")
         return
 
     color = 0x3498DB
@@ -46,9 +79,10 @@ def send_discord_notify(title, link):
             }
         ],
     }
-    
-    resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-    resp.raise_for_status()
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+    except Exception as e:
+        print(f"[-] 發送 Discord 失敗: {e}")
 
 def fetch_rendered_html():
     print("[*] 正在啟動 Chrome 載入官網公告...")
@@ -68,7 +102,6 @@ def fetch_rendered_html():
         return html_content
 
 def clean_title(raw_text):
-    """去除標題末端黏在一起的日期時間"""
     cleaned = re.sub(r"\d{4}\.\d{2}\.\d{2}.*$", "", raw_text).strip()
     return cleaned if cleaned else raw_text
 
@@ -99,7 +132,6 @@ def main():
 
         last_id_str = load_last_id()
 
-        # 首次初始化：只記錄最新篇號，避免把整頁舊公告洗出來
         if not last_id_str or not last_id_str.isdigit():
             max_id = max(n["id"] for n in notices)
             print(f"[+] 首次記錄最新 ID：{max_id}")
@@ -107,24 +139,21 @@ def main():
             return
 
         last_id = int(last_id_str)
-
-        # 篩選出所有比上次紀錄還要新的公告
         new_notices = [n for n in notices if n["id"] > last_id]
 
         if not new_notices:
             print(f"[*] 無新公告，當前最新篇號：{last_id}")
             return
 
-        # 依 ID 由小到大排序（按照發布先後順序推送）
         new_notices.sort(key=lambda x: x["id"])
 
         print(f"[!] 偵測到 {len(new_notices)} 篇新公告！開始推送...")
         for n in new_notices:
             print(f"    - 推送：{n['title']} (ID: {n['id']})")
+            send_line_notify(n["title"], n["link"])
             send_discord_notify(n["title"], n["link"])
-            time.sleep(1.5)  # 間隔 1.5 秒，避免觸發 Discord 頻率限制
+            time.sleep(1.5)
 
-        # 將這次推播中最新的一篇 ID 存回檔案
         save_last_id(new_notices[-1]["id"])
 
     except Exception as e:
