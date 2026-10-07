@@ -5,7 +5,6 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-# 從 GitHub Secrets 讀取
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 BASE_URL = "https://roz.gnjoy.com.tw"
 NOTICE_URL = "https://roz.gnjoy.com.tw/Notice"
@@ -29,7 +28,7 @@ def save_last_id(notice_id):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         f.write(str(notice_id))
 
-def send_discord_notify(title, link, date_str=""):
+def send_discord_notify(title, link):
     if not DISCORD_WEBHOOK_URL:
         print("[-] 錯誤：未找到 DISCORD_WEBHOOK_URL 環境變數")
         return
@@ -42,9 +41,6 @@ def send_discord_notify(title, link, date_str=""):
     elif "異常" in title:
         color = 0xE67E22
 
-    description = f"發布日期：`{date_str}`\n" if date_str else ""
-    description += "點擊上方標題即可前往官網查看完整內容！"
-
     payload = {
         "username": "RO樂園 官網廣播站",
         "avatar_url": "https://roz.gnjoy.com.tw/favicon.ico",
@@ -53,7 +49,7 @@ def send_discord_notify(title, link, date_str=""):
                 "title": f"📢 {title}",
                 "url": link,
                 "color": color,
-                "description": description,
+                "description": "官網發布了最新公告，點擊上方標題即可前往查看完整內容！",
                 "footer": {"text": "RO仙境傳說Online：樂園 自動廣播"},
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
@@ -89,49 +85,44 @@ def main():
                 continue
             
             notice_id = int(match.group(1))
-
-            # 抓取該筆公告同一列顯示的日期（例如 2026.10.05）
-            parent_row = tag.find_parent(["tr", "li", "div"])
-            date_str = ""
-            if parent_row:
-                date_match = re.search(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2})", parent_row.get_text())
-                if date_match:
-                    date_str = date_match.group(1)
-
             notices.append({
                 "id": notice_id,
                 "title": title,
-                "link": urljoin(BASE_URL, href),
-                "date": date_str
+                "link": urljoin(BASE_URL, href)
             })
 
         if not notices:
             print("[-] 未解析到有效的公告項目")
             return
 
-        # 官網 ID 為自動遞增整數，挑出 ID 最大（真正最新發布）的公告，避開置頂舊文
-        latest_notice = max(notices, key=lambda x: (x["date"], x["id"]))
+        # 依照 ID 數值由大到小排序（數值最大的絕對是最新發布的公告）
+        notices.sort(key=lambda x: x["id"], reverse=True)
 
+        # 在日誌中印出抓到的前 3 筆，方便隨時核對
+        print("[*] 頁面上最新公告排序：")
+        for n in notices[:3]:
+            print(f"    - ID: {n['id']} | 標題: {n['title']}")
+
+        latest_notice = notices[0]
         latest_id = str(latest_notice["id"])
         title = latest_notice["title"]
         full_url = latest_notice["link"]
-        date_str = latest_notice["date"]
 
         last_id = load_last_id()
 
         # 首次初始化
         if not last_id:
-            print(f"[+] 首次記錄最新公告 ID：{latest_id}（{title} / {date_str}）")
+            print(f"[+] 首次記錄最新公告 ID：{latest_id}（{title}）")
             save_last_id(latest_id)
             return
 
-        # 比對是否有更新
+        # 偵測到新公告
         if latest_id != last_id:
-            print(f"[!] 偵測到新公告：{title} ({date_str}) ID: {latest_id}")
-            send_discord_notify(title, full_url, date_str=date_str)
+            print(f"[!] 偵測到新公告：{title} (ID: {latest_id})")
+            send_discord_notify(title, full_url)
             save_last_id(latest_id)
         else:
-            print(f"[*] 無新公告，當前最新：{title} ({date_str}) ID: {latest_id}")
+            print(f"[*] 無新公告，當前最新篇號：{latest_id}")
 
     except Exception as e:
         print(f"[-] 執行出錯: {e}")
