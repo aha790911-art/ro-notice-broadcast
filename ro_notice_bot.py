@@ -4,19 +4,12 @@ import time
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 BASE_URL = "https://roz.gnjoy.com.tw"
-NOTICE_LIST_URL = "https://roz.gnjoy.com.tw/Notice"
+NOTICE_URL = "https://roz.gnjoy.com.tw/Notice"
 CACHE_FILE = "last_notice_id.txt"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/128.0.0.0 Safari/537.36"
-    )
-}
 
 def load_last_id():
     if os.path.exists(CACHE_FILE):
@@ -59,69 +52,79 @@ def send_discord_notify(title, link):
     resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
     resp.raise_for_status()
 
-def get_latest_notice():
-    # 抓取公告清單頁原始碼
-    res = requests.get(NOTICE_LIST_URL, headers=HEADERS, timeout=15)
-    res.encoding = "utf-8"
-    if res.status_code != 200:
-        print(f"[-] 無法載入公告頁面，HTTP 狀態碼: {res.status_code}")
-        return None, None, None
-
-    # 1. 直接用正則表達式掃描整份 HTML，找出所有 Notice_Info 的文章編號（不管放在 href 還是 onclick）
-    all_ids = re.findall(r"Notice_Info\?id=(\d+)", res.text, re.IGNORECASE)
-    if not all_ids:
-        print("[-] 未在網頁原始碼中比對到任何公告編號")
-        return None, None, None
-
-    # 轉成整數並排序，取最大值（數字最大的就是最新發布的公告）
-    int_ids = sorted(list(set(int(i) for i in all_ids)), reverse=True)
-    latest_id = int_ids[0]
-    notice_url = f"{BASE_URL}/Notice/Notice_Info?id={latest_id}"
-    print(f"[*] 成功掃描到最新文章 ID: {latest_id}")
-
-    # 2. 請求該篇最新公告的內頁，取得真實公告標題
-    title = f"最新公告 #{latest_id}"
-    try:
-        info_res = requests.get(notice_url, headers=HEADERS, timeout=10)
-        info_res.encoding = "utf-8"
-        soup = BeautifulSoup(info_res.text, "html.parser")
-        
-        # 尋找內頁帶有【】的標題文字
-        for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "div", "span"]):
-            text = tag.get_text(strip=True)
-            if "【" in text and "】" in text and len(text) < 60:
-                title = text
-                break
-                
-        # 備用方案：抓網頁標題
-        if title.startswith("最新公告 #") and soup.title:
-            raw_title = soup.title.get_text(strip=True)
-            title = re.sub(r"[-–|].*", "", raw_title).strip() or title
-    except Exception as e:
-        print(f"[-] 擷取標題時出錯: {e}")
-
-    return str(latest_id), title, notice_url
+def fetch_rendered_html():
+    """使用無頭 Chrome 完整執行 JavaScript 並渲染網頁"""
+    print("[*] 正在啟動 Chrome 載入官網公告...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/128.0.0.0 Safari/537.36"
+            )
+        )
+        page.goto(NOTICE_URL, timeout=45000)
+        # 等待 4 秒，讓 JavaScript 完整把後台最新公告填入頁面
+        page.wait_for_timeout(4000)
+        html_content = page.content()
+        browser.close()
+        return html_content
 
 def main():
-    latest_id, title, full_url = get_latest_notice()
-    if not latest_id:
-        return
+    try:
+        html = fetch_rendered_html()
+        soup = BeautifulSoup(html, "html.parser")
 
-    last_id = load_last_id()
+        # 掃描頁面上所有帶有 Notice_Info 的連結
+        link_tags = soup.find_all("a", href=re.compile(r"Notice_Info\?id=\d+"))
+        notices = []
 
-    # 首次啟動初始化
-    if not last_id:
-        print(f"[+] 首次記錄最新 ID：{latest_id}（{title}）")
-        save_last_id(latest_id)
-        return
+        for tag in link_tags:
+            href = tag.get("href", "")
+            title = tag.get_text(strip=True)
+            match = re.search(r"id=(\d+)", href)
+            if match and title:
+                notices.append({
+                    "id": int(match.group(1)),
+                    "title": title,
+                    "link": urljoin(BASE_URL, href)
+                })
 
-    # 偵測到新公告
-    if latest_id != last_id:
-        print(f"[!] 偵測到新公告：{title} (ID: {latest_id})")
-        send_discord_notify(title, full_url)
-        save_last_id(latest_id)
-    else:
-        print(f"[*] 無新公告，當前最新篇號：{latest_id}")
+        if not notices:
+            print("[-] 未能解析到公告項目")
+            return
+
+        # 依文章 ID 由大到小排序（數值最大的絕對是最新公告）
+        notices.sort(key=lambda x: x["id"], reverse=True)
+
+        print("[*] 頁面成功解析！當前公告列表前 3 筆：")
+        for item in notices[:3]:
+            print(f"    - ID: {item['id']} | 標題: {item['title']}")
+
+        latest_notice = notices[0]
+        latest_id = str(latest_notice["id"])
+        title = latest_notice["title"]
+        full_url = latest_notice["link"]
+
+        last_id = load_last_id()
+
+        # 首次初始化
+        if not last_id:
+            print(f"[+] 首次記錄最新 ID：{latest_id}（{title}）")
+            save_last_id(latest_id)
+            return
+
+        # 比對新公告
+        if latest_id != last_id:
+            print(f"[!] 偵測到新公告：{title} (ID: {latest_id})")
+            send_discord_notify(title, full_url)
+            save_last_id(latest_id)
+        else:
+            print(f"[*] 無新公告，當前最新篇號：{latest_id}")
+
+    except Exception as e:
+        print(f"[-] 執行出錯: {e}")
 
 if __name__ == "__main__":
     main()
