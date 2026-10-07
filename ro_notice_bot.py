@@ -97,30 +97,35 @@ def main():
             print("[-] 未能解析到公告項目")
             return
 
-        notices.sort(key=lambda x: x["id"], reverse=True)
+        last_id_str = load_last_id()
 
-        latest_notice = notices[0]
-        latest_id = str(latest_notice["id"])
-        title = latest_notice["title"]
-        full_url = latest_notice["link"]
-
-        print(f"[*] 解析到最新文章 URL: {full_url}")
-
-        last_id = load_last_id()
-
-        # 首次初始化
-        if not last_id:
-            print(f"[+] 首次記錄最新 ID：{latest_id}（{title}）")
-            save_last_id(latest_id)
+        # 首次初始化：只記錄最新篇號，避免把整頁舊公告洗出來
+        if not last_id_str or not last_id_str.isdigit():
+            max_id = max(n["id"] for n in notices)
+            print(f"[+] 首次記錄最新 ID：{max_id}")
+            save_last_id(max_id)
             return
 
-        # 比對新公告
-        if latest_id != last_id:
-            print(f"[!] 偵測到新公告：{title} (ID: {latest_id})")
-            send_discord_notify(title, full_url)
-            save_last_id(latest_id)
-        else:
-            print(f"[*] 無新公告，當前最新篇號：{latest_id}")
+        last_id = int(last_id_str)
+
+        # 篩選出所有比上次紀錄還要新的公告
+        new_notices = [n for n in notices if n["id"] > last_id]
+
+        if not new_notices:
+            print(f"[*] 無新公告，當前最新篇號：{last_id}")
+            return
+
+        # 依 ID 由小到大排序（按照發布先後順序推送）
+        new_notices.sort(key=lambda x: x["id"])
+
+        print(f"[!] 偵測到 {len(new_notices)} 篇新公告！開始推送...")
+        for n in new_notices:
+            print(f"    - 推送：{n['title']} (ID: {n['id']})")
+            send_discord_notify(n["title"], n["link"])
+            time.sleep(1.5)  # 間隔 1.5 秒，避免觸發 Discord 頻率限制
+
+        # 將這次推播中最新的一篇 ID 存回檔案
+        save_last_id(new_notices[-1]["id"])
 
     except Exception as e:
         print(f"[-] 執行出錯: {e}")
