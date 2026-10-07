@@ -7,12 +7,7 @@ from bs4 import BeautifulSoup
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 BASE_URL = "https://roz.gnjoy.com.tw"
-
-# GNJOY 真正的公告列表完整路徑
-TARGET_URLS = [
-    "https://roz.gnjoy.com.tw/Notice/Notice_List",
-    "https://roz.gnjoy.com.tw/Notice"
-]
+NOTICE_LIST_URL = "https://roz.gnjoy.com.tw/Notice"
 CACHE_FILE = "last_notice_id.txt"
 
 HEADERS = {
@@ -64,59 +59,53 @@ def send_discord_notify(title, link):
     resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
     resp.raise_for_status()
 
-def fetch_notices():
-    """優先抓取 Notice_List，若失敗則回退至 Notice"""
-    for url in TARGET_URLS:
-        try:
-            print(f"[*] 嘗試請求頁面：{url}")
-            res = requests.get(url, headers=HEADERS, timeout=15)
-            res.encoding = "utf-8"
-            if res.status_code != 200:
-                continue
+def get_latest_notice():
+    # 抓取公告清單頁原始碼
+    res = requests.get(NOTICE_LIST_URL, headers=HEADERS, timeout=15)
+    res.encoding = "utf-8"
+    if res.status_code != 200:
+        print(f"[-] 無法載入公告頁面，HTTP 狀態碼: {res.status_code}")
+        return None, None, None
 
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 同時比對 a 標籤與全域帶有 Notice_Info 的連結
-            link_tags = soup.find_all("a", href=re.compile(r"Notice_Info\?id=\d+"))
-            notices = []
-            
-            for tag in link_tags:
-                href = tag.get("href", "")
-                title = tag.get_text(strip=True)
-                match = re.search(r"id=(\d+)", href)
-                if match and title:
-                    notice_id = int(match.group(1))
-                    notices.append({
-                        "id": notice_id,
-                        "title": title,
-                        "link": urljoin(BASE_URL, href)
-                    })
+    # 1. 直接用正則表達式掃描整份 HTML，找出所有 Notice_Info 的文章編號（不管放在 href 還是 onclick）
+    all_ids = re.findall(r"Notice_Info\?id=(\d+)", res.text, re.IGNORECASE)
+    if not all_ids:
+        print("[-] 未在網頁原始碼中比對到任何公告編號")
+        return None, None, None
 
-            # 若抓到的公告數量大於 1，代表成功取得清單
-            if len(notices) > 1:
-                return notices
-        except Exception as e:
-            print(f"[-] 請求 {url} 發生錯誤: {e}")
+    # 轉成整數並排序，取最大值（數字最大的就是最新發布的公告）
+    int_ids = sorted(list(set(int(i) for i in all_ids)), reverse=True)
+    latest_id = int_ids[0]
+    notice_url = f"{BASE_URL}/Notice/Notice_Info?id={latest_id}"
+    print(f"[*] 成功掃描到最新文章 ID: {latest_id}")
 
-    return notices
+    # 2. 請求該篇最新公告的內頁，取得真實公告標題
+    title = f"最新公告 #{latest_id}"
+    try:
+        info_res = requests.get(notice_url, headers=HEADERS, timeout=10)
+        info_res.encoding = "utf-8"
+        soup = BeautifulSoup(info_res.text, "html.parser")
+        
+        # 尋找內頁帶有【】的標題文字
+        for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "div", "span"]):
+            text = tag.get_text(strip=True)
+            if "【" in text and "】" in text and len(text) < 60:
+                title = text
+                break
+                
+        # 備用方案：抓網頁標題
+        if title.startswith("最新公告 #") and soup.title:
+            raw_title = soup.title.get_text(strip=True)
+            title = re.sub(r"[-–|].*", "", raw_title).strip() or title
+    except Exception as e:
+        print(f"[-] 擷取標題時出錯: {e}")
+
+    return str(latest_id), title, notice_url
 
 def main():
-    notices = fetch_notices()
-    if not notices:
-        print("[-] 警告：完全未在官網抓到任何公告！")
+    latest_id, title, full_url = get_latest_notice()
+    if not latest_id:
         return
-
-    # 依照 ID 數值由大到小排序
-    notices.sort(key=lambda x: x["id"], reverse=True)
-
-    print("[*] 成功解析公告列表（顯示最新前 3 筆）：")
-    for item in notices[:3]:
-        print(f"    - ID: {item['id']} | 標題: {item['title']}")
-
-    latest = notices[0]
-    latest_id = str(latest["id"])
-    title = latest["title"]
-    full_url = latest["link"]
 
     last_id = load_last_id()
 
