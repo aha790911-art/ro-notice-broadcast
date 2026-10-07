@@ -7,7 +7,12 @@ from bs4 import BeautifulSoup
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 BASE_URL = "https://roz.gnjoy.com.tw"
-NOTICE_URL = "https://roz.gnjoy.com.tw/Notice"
+
+# GNJOY 真正的公告列表完整路徑
+TARGET_URLS = [
+    "https://roz.gnjoy.com.tw/Notice/Notice_List",
+    "https://roz.gnjoy.com.tw/Notice"
+]
 CACHE_FILE = "last_notice_id.txt"
 
 HEADERS = {
@@ -59,73 +64,75 @@ def send_discord_notify(title, link):
     resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
     resp.raise_for_status()
 
-def main():
-    try:
-        res = requests.get(NOTICE_URL, headers=HEADERS, timeout=15)
-        res.encoding = "utf-8"
-        if res.status_code != 200:
-            print(f"[-] 伺服器響應異常：{res.status_code}")
-            return
-
-        soup = BeautifulSoup(res.text, "html.parser")
-        link_tags = soup.find_all("a", href=re.compile(r"Notice_Info\?id=\d+"))
-        if not link_tags:
-            print("[-] 未在頁面上解析到任何公告連結")
-            return
-
-        notices = []
-        for tag in link_tags:
-            href = tag.get("href", "")
-            title = tag.get_text(strip=True)
-            if not title:
+def fetch_notices():
+    """優先抓取 Notice_List，若失敗則回退至 Notice"""
+    for url in TARGET_URLS:
+        try:
+            print(f"[*] 嘗試請求頁面：{url}")
+            res = requests.get(url, headers=HEADERS, timeout=15)
+            res.encoding = "utf-8"
+            if res.status_code != 200:
                 continue
 
-            match = re.search(r"id=(\d+)", href)
-            if not match:
-                continue
+            soup = BeautifulSoup(res.text, "html.parser")
             
-            notice_id = int(match.group(1))
-            notices.append({
-                "id": notice_id,
-                "title": title,
-                "link": urljoin(BASE_URL, href)
-            })
+            # 同時比對 a 標籤與全域帶有 Notice_Info 的連結
+            link_tags = soup.find_all("a", href=re.compile(r"Notice_Info\?id=\d+"))
+            notices = []
+            
+            for tag in link_tags:
+                href = tag.get("href", "")
+                title = tag.get_text(strip=True)
+                match = re.search(r"id=(\d+)", href)
+                if match and title:
+                    notice_id = int(match.group(1))
+                    notices.append({
+                        "id": notice_id,
+                        "title": title,
+                        "link": urljoin(BASE_URL, href)
+                    })
 
-        if not notices:
-            print("[-] 未解析到有效的公告項目")
-            return
+            # 若抓到的公告數量大於 1，代表成功取得清單
+            if len(notices) > 1:
+                return notices
+        except Exception as e:
+            print(f"[-] 請求 {url} 發生錯誤: {e}")
 
-        # 依照 ID 數值由大到小排序（數值最大的絕對是最新發布的公告）
-        notices.sort(key=lambda x: x["id"], reverse=True)
+    return notices
 
-        # 在日誌中印出抓到的前 3 筆，方便隨時核對
-        print("[*] 頁面上最新公告排序：")
-        for n in notices[:3]:
-            print(f"    - ID: {n['id']} | 標題: {n['title']}")
+def main():
+    notices = fetch_notices()
+    if not notices:
+        print("[-] 警告：完全未在官網抓到任何公告！")
+        return
 
-        latest_notice = notices[0]
-        latest_id = str(latest_notice["id"])
-        title = latest_notice["title"]
-        full_url = latest_notice["link"]
+    # 依照 ID 數值由大到小排序
+    notices.sort(key=lambda x: x["id"], reverse=True)
 
-        last_id = load_last_id()
+    print("[*] 成功解析公告列表（顯示最新前 3 筆）：")
+    for item in notices[:3]:
+        print(f"    - ID: {item['id']} | 標題: {item['title']}")
 
-        # 首次初始化
-        if not last_id:
-            print(f"[+] 首次記錄最新公告 ID：{latest_id}（{title}）")
-            save_last_id(latest_id)
-            return
+    latest = notices[0]
+    latest_id = str(latest["id"])
+    title = latest["title"]
+    full_url = latest["link"]
 
-        # 偵測到新公告
-        if latest_id != last_id:
-            print(f"[!] 偵測到新公告：{title} (ID: {latest_id})")
-            send_discord_notify(title, full_url)
-            save_last_id(latest_id)
-        else:
-            print(f"[*] 無新公告，當前最新篇號：{latest_id}")
+    last_id = load_last_id()
 
-    except Exception as e:
-        print(f"[-] 執行出錯: {e}")
+    # 首次啟動初始化
+    if not last_id:
+        print(f"[+] 首次記錄最新 ID：{latest_id}（{title}）")
+        save_last_id(latest_id)
+        return
+
+    # 偵測到新公告
+    if latest_id != last_id:
+        print(f"[!] 偵測到新公告：{title} (ID: {latest_id})")
+        send_discord_notify(title, full_url)
+        save_last_id(latest_id)
+    else:
+        print(f"[*] 無新公告，當前最新篇號：{latest_id}")
 
 if __name__ == "__main__":
     main()
