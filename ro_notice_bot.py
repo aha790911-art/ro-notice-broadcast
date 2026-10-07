@@ -1,13 +1,11 @@
 import os
 import re
 import time
-from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-BASE_URL = "https://roz.gnjoy.com.tw"
 NOTICE_URL = "https://roz.gnjoy.com.tw/Notice"
 CACHE_FILE = "last_notice_id.txt"
 
@@ -53,7 +51,6 @@ def send_discord_notify(title, link):
     resp.raise_for_status()
 
 def fetch_rendered_html():
-    """使用無頭 Chrome 完整執行 JavaScript 並渲染網頁"""
     print("[*] 正在啟動 Chrome 載入官網公告...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -65,47 +62,50 @@ def fetch_rendered_html():
             )
         )
         page.goto(NOTICE_URL, timeout=45000)
-        # 等待 4 秒，讓 JavaScript 完整把後台最新公告填入頁面
         page.wait_for_timeout(4000)
         html_content = page.content()
         browser.close()
         return html_content
+
+def clean_title(raw_text):
+    """去除標題結尾黏在一起的時間日期，例如 2026.10.0516:30:00"""
+    cleaned = re.sub(r"\d{4}\.\d{2}\.\d{2}.*$", "", raw_text).strip()
+    return cleaned if cleaned else raw_text
 
 def main():
     try:
         html = fetch_rendered_html()
         soup = BeautifulSoup(html, "html.parser")
 
-        # 掃描頁面上所有帶有 Notice_Info 的連結
         link_tags = soup.find_all("a", href=re.compile(r"Notice_Info\?id=\d+"))
         notices = []
 
         for tag in link_tags:
             href = tag.get("href", "")
-            title = tag.get_text(strip=True)
+            title = clean_title(tag.get_text(strip=True))
             match = re.search(r"id=(\d+)", href)
             if match and title:
+                notice_id = int(match.group(1))
+                # 強制生成官方正確的絕對路徑
+                correct_url = f"https://roz.gnjoy.com.tw/Notice/Notice_Info?id={notice_id}"
                 notices.append({
-                    "id": int(match.group(1)),
+                    "id": notice_id,
                     "title": title,
-                    "link": urljoin(BASE_URL, href)
+                    "link": correct_url
                 })
 
         if not notices:
             print("[-] 未能解析到公告項目")
             return
 
-        # 依文章 ID 由大到小排序（數值最大的絕對是最新公告）
         notices.sort(key=lambda x: x["id"], reverse=True)
-
-        print("[*] 頁面成功解析！當前公告列表前 3 筆：")
-        for item in notices[:3]:
-            print(f"    - ID: {item['id']} | 標題: {item['title']}")
 
         latest_notice = notices[0]
         latest_id = str(latest_notice["id"])
         title = latest_notice["title"]
         full_url = latest_notice["link"]
+
+        print(f"[*] 解析到最新文章 URL: {full_url}")
 
         last_id = load_last_id()
 
